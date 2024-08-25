@@ -45,6 +45,7 @@ const Home: React.FC = () => {
   }, [loading, hasMore]);
 
   const fetchImages = useCallback(async () => {
+    console.log("Fetching images... Last fetched at:", lastFetchedAt);
     if (!hasMore || loading) return;
     setLoading(true);
     try {
@@ -58,16 +59,19 @@ const Home: React.FC = () => {
           setImages(prev => [...prev, ...data]);
         });
         setLastFetchedAt(data[data.length - 1].created_at);
+        console.log("New images loaded:", data);
       }
     } catch (error) {
       console.error('Error fetching images:', error);
       setError('Failed to fetch images. Please try again later.');
     } finally {
       setLoading(false);
+      console.log("Finished fetching images.");
     }
   }, [hasMore, loading, lastFetchedAt]);
 
   useEffect(() => {
+    console.log("Initial image load.");
     fetchImages();
     setUserVotes(JSON.parse(localStorage.getItem('userVotes') || '{}'));
   }, []);
@@ -80,48 +84,58 @@ const Home: React.FC = () => {
     e.preventDefault();
     setError(null);
     setLoadingSubmit(true);
+    console.log("Submitting form with data:", formData, "File:", file);
     const { title, description, artist, artistName, youtubeLink } = formData;
     if ((!file && !youtubeLink) || !title || !description || !artist || !artistName) {
       setError('All fields are required. Please provide either a file or a YouTube link.');
       setLoadingSubmit(false);
+      console.log("Form submission failed due to missing fields.");
       return;
     }
     try {
       let file_path: string | null = null;
       if (file) {
         const fileName = `${Math.random()}.${file.name.split('.').pop()}`;
+        console.log("Uploading file:", fileName);
         const { data, error } = await supabase.storage.from('images').upload(fileName, file);
         if (error) throw error;
         file_path = data?.path || null;
+        console.log("File uploaded successfully:", data);
       }
       if (!file_path && youtubeLink) {
         file_path = '';
       }
+      console.log("Inserting image data:", { title, description, artist, artist_name: artistName, file_path, youtube_link: youtubeLink || null });
       const { data: insertData, error: insertError } = await supabase.from('images').insert({
         title, description, artist, artist_name: artistName, file_path, youtube_link: youtubeLink || null,
         stars: 0, num_votes: 0, hidden: false
-      });
+      }).select("*").single();
       if (insertError) throw insertError;
+      console.log("Image inserted successfully:", insertData);
 
       setFormData({ title: '', description: '', artist: '', artistName: '', youtubeLink: '' });
       setFile(null);
       setShowForm(false);
+
+      // Add the new image directly to the images state
       ReactDOM.flushSync(() => {
-        setImages([]);
-        setLastFetchedAt(null);
-        setHasMore(true);
+        setImages(prevImages => [insertData, ...prevImages]);
       });
-      await fetchImages();
+
+      console.log("New image added to state:", insertData);
     } catch (error) {
       console.error('Error in handleSubmit:', error);
       setError('An unexpected error occurred. Please check the console for more details.');
     } finally {
       setLoadingSubmit(false);
+      console.log("Form submission process completed.");
     }
   };
 
+
   const handleRate = async (id: number) => {
     if (userVotes[id]) return;
+    console.log("Rating image with ID:", id);
     try {
       const image = images.find(img => img.id === id);
       if (!image) return;
@@ -137,6 +151,7 @@ const Home: React.FC = () => {
       const newUserVotes = { ...userVotes, [id]: true };
       setUserVotes(newUserVotes);
       localStorage.setItem('userVotes', JSON.stringify(newUserVotes));
+      console.log("Rating updated for image ID:", id);
     } catch (error) {
       console.error('Error updating rating:', error);
       setError('Failed to update rating. Please try again.');
