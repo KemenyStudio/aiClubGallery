@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '../lib/supabaseClient';
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "../components/ui/card";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { Button } from "../components/ui/button";
-import { ThumbsUp, Star, Plus, X } from 'lucide-react';
+import { Star, Plus, X } from 'lucide-react';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 
 interface Image {
   id: number;
@@ -12,12 +13,14 @@ interface Image {
   description: string;
   artist: string;
   file_path: string;
-  votes: number;
   stars: number;
   num_votes: number;
+  created_at: string;
 }
 
-const Skeleton = ({ className, ...props }: React.HTMLProps<HTMLDivElement>) => {
+type GalleryItem = Image | null;
+
+const Skeleton: React.FC<React.HTMLProps<HTMLDivElement>> = ({ className, ...props }) => {
   return (
     <div
       className={`animate-pulse bg-gray-200 rounded-md ${className}`}
@@ -26,49 +29,83 @@ const Skeleton = ({ className, ...props }: React.HTMLProps<HTMLDivElement>) => {
   )
 }
 
-export default function Home() {
-  const [images, setImages] = useState<Image[]>([]);
+const Home: React.FC = () => {
+  const [images, setImages] = useState<GalleryItem[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [artist, setArtist] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const [lastFetchedAt, setLastFetchedAt] = useState<string | null>(null);
+  const [userVotes, setUserVotes] = useState<{[key: number]: boolean}>({});
 
-  useEffect(() => {
-    fetchImages();
-  }, []);
+  const observer = useRef<IntersectionObserver | null>(null);
+  const lastImageElementRef = useCallback((node: HTMLElement | null) => {
+    if (loading) return;
+    if (observer.current) observer.current.disconnect();
+    observer.current = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting && hasMore) {
+        fetchImages();
+      }
+    });
+    if (node) observer.current.observe(node);
+  }, [loading, hasMore]);
 
-  async function fetchImages() {
+  const fetchImages = useCallback(async () => {
+    if (!hasMore || loading) return;
+
     try {
-      const { data, error } = await supabase
+      setLoading(true);
+      let query = supabase
         .from('images')
         .select('*')
-        .order('created_at', { ascending: false });
+        .eq('hidden', false)  // Only fetch non-hidden images
+        .order('created_at', { ascending: false })
+        .limit(5);
+
+      if (lastFetchedAt) {
+        query = query.lt('created_at', lastFetchedAt);
+      }
+
+      const { data, error } = await query;
 
       if (error) throw error;
 
-      setImages(data || []);
+      if (data.length === 0) {
+        setHasMore(false);
+      } else {
+        setImages(prevImages => [...prevImages, ...data]);
+        setLastFetchedAt(data[data.length - 1].created_at);
+      }
     } catch (error) {
       console.error('Error fetching images:', error);
       setError('Failed to fetch images. Please try again later.');
+    } finally {
+      setLoading(false);
     }
-  }
+  }, [hasMore, loading, lastFetchedAt]);
 
-  async function handleSubmit(e: React.FormEvent) {
+  useEffect(() => {
+    fetchImages();
+    const storedVotes = JSON.parse(localStorage.getItem('userVotes') || '{}');
+    setUserVotes(storedVotes);
+  }, []);
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
-    if (!file || !title) {
-      setError('File and title are required');
+    if (!file || !title || !description || !artist) {
+      setError('All fields are required');
       return;
     }
 
     const fileExt = file.name.split('.').pop();
     const fileName = `${Math.random()}.${fileExt}`;
     const bucketName = 'images';
-
-    console.log(`Attempting to upload ${fileName} to bucket: ${bucketName}`);
 
     try {
       const { data, error } = await supabase.storage
@@ -81,29 +118,27 @@ export default function Home() {
         throw new Error('Upload successful but file path is missing');
       }
 
-      console.log('File uploaded successfully. Path:', data.path);
-
-      const { data: imageData, error: insertError } = await supabase
+      const { error: insertError } = await supabase
         .from('images')
         .insert({ 
           title, 
           description, 
           artist, 
           file_path: data.path,
-          votes: 0,
           stars: 0,
           num_votes: 0
         });
 
       if (insertError) throw insertError;
 
-      console.log('Image data inserted successfully');
-
       setTitle('');
       setDescription('');
       setArtist('');
       setFile(null);
       setShowForm(false);
+      setImages([]);
+      setLastFetchedAt(null);
+      setHasMore(true);
       fetchImages();
 
     } catch (error) {
@@ -114,28 +149,18 @@ export default function Home() {
         setError('An unexpected error occurred');
       }
     }
-  }
+  };
 
-  async function handleVote(id: number) {
+  const handleRate = async (id: number) => {
     try {
-      const { data, error } = await supabase
-        .from('images')
-        .update({ votes: images.find(img => img.id === id)!.votes + 1 })
-        .eq('id', id);
+      if (userVotes[id]) {
+        return; // User has already voted, do nothing
+      }
 
-      if (error) throw error;
+      const image = images.find(img => img?.id === id);
+      if (!image) return;
 
-      fetchImages();
-    } catch (error) {
-      console.error('Error updating votes:', error);
-      setError('Failed to update votes. Please try again.');
-    }
-  }
-
-  async function handleRate(id: number) {
-    try {
-      const image = images.find(img => img.id === id)!;
-      const { data, error } = await supabase
+      const { error } = await supabase
         .from('images')
         .update({ 
           stars: image.stars + 1,
@@ -145,73 +170,86 @@ export default function Home() {
 
       if (error) throw error;
 
-      fetchImages();
+      // Update local state
+      setImages(prevImages => prevImages.map(img => 
+        img?.id === id ? { ...img, stars: img.stars + 1, num_votes: img.num_votes + 1 } : img
+      ));
+
+      // Update userVotes state and localStorage
+      const newUserVotes = { ...userVotes, [id]: true };
+      setUserVotes(newUserVotes);
+      localStorage.setItem('userVotes', JSON.stringify(newUserVotes));
+
     } catch (error) {
       console.error('Error updating rating:', error);
       setError('Failed to update rating. Please try again.');
     }
-  }
-
-  const renderGalleryItems = () => {
-    const items = [...images];
-    while (items.length < 10) {
-      items.push({ id: items.length, isSkeleton: true } as any);
-    }
-    return items.map((item) => renderGalleryItem(item));
   };
 
-  const renderGalleryItem = (item: Image | { id: number, isSkeleton: true }) => (
-    <Card key={item.id} className="flex flex-col">
+  const renderGalleryItem = (item: GalleryItem, index: number) => (
+    <Card key={item ? item.id : `skeleton-${index}`} className="flex flex-col" ref={index === images.length - 1 ? lastImageElementRef : null}>
       <CardHeader>
         <CardTitle className="text-lg">
-          {'isSkeleton' in item ? <Skeleton className="h-6 w-3/4" /> : item.title}
+          {item ? (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger>
+                  {item.title}
+                </TooltipTrigger>
+                <TooltipContent>
+                  {`${item.artist} ${item.description}`}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          ) : (
+            <Skeleton className="h-6 w-3/4" />
+          )}
         </CardTitle>
       </CardHeader>
       <CardContent className="flex-grow">
-        {'isSkeleton' in item ? (
-          <Skeleton className="w-full h-48 rounded-md" />
-        ) : (
+        {item ? (
           <img
             src={`${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/images/${item.file_path}`}
             alt={item.title}
             className="w-full h-48 object-cover rounded-md"
           />
-        )}
-        {'isSkeleton' in item && (
-          <>
-            <Skeleton className="h-4 w-1/2 mb-2 mt-2" />
-            <Skeleton className="h-4 w-full mb-1" />
-            <Skeleton className="h-4 w-3/4" />
-          </>
+        ) : (
+          <Skeleton className="w-full h-48 rounded-md" />
         )}
       </CardContent>
-      <CardFooter className="flex justify-between">
-        {'isSkeleton' in item ? (
-          <>
-            <Skeleton className="h-8 w-16" />
-            <Skeleton className="h-8 w-24" />
-          </>
+      <CardFooter className="flex justify-end">
+        {item ? (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  onClick={() => handleRate(item.id)}
+                  disabled={userVotes[item.id]}
+                >
+                  {userVotes[item.id] ? (
+                    <Star className="mr-2 h-4 w-4" fill="currentColor" />
+                  ) : (
+                    <Star className="mr-2 h-4 w-4" />
+                  )}
+                  {item.stars} ({item.num_votes})
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {userVotes[item.id] ? "You&apos;ve already voted" : "Click to vote"}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         ) : (
-          <>
-            <Button variant="outline" size="sm" onClick={() => handleVote(item.id)}>
-              <ThumbsUp className="mr-2 h-4 w-4" />
-              {item.votes}
-            </Button>
-            <div className="flex items-center">
-              <Button variant="outline" size="sm" onClick={() => handleRate(item.id)}>
-                <Star className="mr-2 h-4 w-4" />
-                {item.stars}
-              </Button>
-              <span className="ml-2 text-sm text-gray-500">({item.num_votes} votes)</span>
-            </div>
-          </>
+          <Skeleton className="h-8 w-24" />
         )}
       </CardFooter>
     </Card>
   );
 
   return (
-    <div className="max-w-full mx-auto p-4">
+    <div className="max-w-full mx-auto p-4 pb-16">
       {error && (
         <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4" role="alert">
           <strong className="font-bold">Error: </strong>
@@ -221,7 +259,7 @@ export default function Home() {
       {showForm ? (
         <Card className="mb-8">
           <CardHeader className="flex flex-row items-center justify-between">
-            <CardTitle>Upload Image</CardTitle>
+            <CardTitle>Sube tu imagen</CardTitle>
             <Button variant="ghost" size="sm" onClick={() => setShowForm(false)}>
               <X className="h-4 w-4" />
             </Button>
@@ -233,35 +271,55 @@ export default function Home() {
                 accept="image/*" 
                 onChange={(e) => setFile(e.target.files?.[0] || null)} 
                 className="mb-2"
+                required
               />
               <Input 
                 value={title} 
                 onChange={(e) => setTitle(e.target.value)} 
-                placeholder="Enter image title" 
+                placeholder="Titulo" 
+                required
               />
               <Textarea 
                 value={description} 
                 onChange={(e) => setDescription(e.target.value)} 
-                placeholder="Enter image description" 
+                placeholder="Prompt" 
+                required
               />
               <Input 
                 value={artist} 
                 onChange={(e) => setArtist(e.target.value)} 
-                placeholder="Enter artist name" 
+                placeholder="Tu correo" 
+                required
               />
-              <Button type="submit" className="w-full">Submit</Button>
+              <Button type="submit" className="w-full">Publicar</Button>
             </form>
           </CardContent>
         </Card>
       ) : (
         <Button onClick={() => setShowForm(true)} className="mb-8 w-full sm:w-auto">
-          <Plus className="mr-2 h-4 w-4" /> Add New Image
+          <Plus className="mr-2 h-4 w-4" /> Subir
         </Button>
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-        {renderGalleryItems()}
+        {images.map((item, index) => renderGalleryItem(item, index))}
       </div>
+
+      {loading && (
+        <div className="flex justify-center items-center mt-4">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900"></div>
+        </div>
+      )}
+
+      {!loading && !hasMore && images.length > 0 && (
+        <p className="text-center mt-4 text-gray-500">No more images to load.</p>
+      )}
+
+      <footer className="fixed bottom-0 left-0 right-0 bg-white p-4 text-center border-t">
+        Bienvenido a la galería de <a href="https://chat.whatsapp.com/CkyVG6bcrMB5nwkDhSX8jz">/Imagine AI</a> de <a href="https://elclubdelaia.com/">El Club de La IA</a>
+      </footer>
     </div>
   );
 }
+
+export default Home;
